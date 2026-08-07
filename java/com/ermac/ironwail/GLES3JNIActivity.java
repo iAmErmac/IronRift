@@ -12,7 +12,12 @@ import android.view.MotionEvent;
 import android.view.Window;
 import android.view.WindowManager;
 import java.io.FileOutputStream;
+import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -29,7 +34,7 @@ public final class GLES3JNIActivity extends Activity {
     private GLSurfaceView view;
     private boolean nativeStarted;
 
-    private static native void nativeInit(String dataDir);
+    private static native void nativeInit(String dataDir, String[] launchArgs);
     private static native void nativeResize(int width, int height);
     private static native void nativeRender();
     private static native void nativeKey(int keycode, boolean down);
@@ -48,6 +53,7 @@ public final class GLES3JNIActivity extends Activity {
         SDL.setContext(this);
 
         final File dataDir = prepareDataDir();
+        final String[] launchArgs = readCommandLine(dataDir);
 
         view = new GLSurfaceView(this);
         view.setEGLContextClientVersion(3);
@@ -55,7 +61,7 @@ public final class GLES3JNIActivity extends Activity {
         view.setFocusableInTouchMode(true);
         view.setRenderer(new GLSurfaceView.Renderer() {
             public void onSurfaceCreated(GL10 gl, EGLConfig config) {
-                nativeInit(dataDir.getAbsolutePath());
+                nativeInit(dataDir.getAbsolutePath(), launchArgs);
                 nativeStarted = true;
             }
             public void onSurfaceChanged(GL10 gl, int width, int height) {
@@ -83,8 +89,95 @@ public final class GLES3JNIActivity extends Activity {
         }
         if (!dataDir.exists() && !dataDir.mkdirs())
             Log.e("Ironwail", "Could not create Quake data directory: " + dataDir);
+        extractEnginePak(dataDir);
         extractSharewarePak(dataDir);
         return dataDir;
+    }
+
+    private String[] readCommandLine(File dataDir) {
+        File commandLine = new File(dataDir, "commandline.txt");
+        if (!commandLine.isFile()) {
+            createDefaultCommandLine(commandLine);
+            return new String[0];
+        }
+
+        StringBuilder text = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new FileReader(commandLine))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (text.length() > 0)
+                    text.append(" ");
+                text.append(line);
+            }
+        } catch (IOException e) {
+            Log.w("Ironwail", "Could not read commandline.txt: " + e.getMessage());
+            return new String[0];
+        }
+
+        List<String> tokens = tokenizeCommandLine(text.toString());
+        if (tokens.size() <= 1) {
+            Log.w("Ironwail", "commandline.txt needs an executable name followed by launch arguments");
+            return new String[0];
+        }
+        tokens.remove(0);
+        Log.i("Ironwail", "Loaded " + tokens.size() + " launch arguments from commandline.txt");
+        return tokens.toArray(new String[0]);
+    }
+
+    private void createDefaultCommandLine(File commandLine) {
+        try (FileOutputStream out = new FileOutputStream(commandLine)) {
+            out.write("ironwail\n".getBytes("UTF-8"));
+            Log.i("Ironwail", "Created empty commandline.txt");
+        } catch (IOException e) {
+            Log.w("Ironwail", "Could not create commandline.txt: " + e.getMessage());
+        }
+    }
+
+    private static List<String> tokenizeCommandLine(String text) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder token = new StringBuilder();
+        char quote = 0;
+        for (int i = 0; i < text.length(); ++i) {
+            char c = text.charAt(i);
+            if (quote != 0) {
+                if (c == quote)
+                    quote = 0;
+                else
+                    token.append(c);
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (Character.isWhitespace(c)) {
+                if (token.length() > 0) {
+                    tokens.add(token.toString());
+                    token.setLength(0);
+                }
+            } else {
+                token.append(c);
+            }
+        }
+        if (token.length() > 0)
+            tokens.add(token.toString());
+        return tokens;
+    }
+
+
+    private void extractEnginePak(File dataDir) {
+        File pak = new File(dataDir, "ironwail.pak");
+        if (pak.isFile())
+            return;
+        File temp = new File(dataDir, "ironwail.pak.part");
+        try (InputStream in = getAssets().open("ironwail.pak");
+             FileOutputStream out = new FileOutputStream(temp)) {
+            byte[] buffer = new byte[65536];
+            int count;
+            while ((count = in.read(buffer)) != -1)
+                out.write(buffer, 0, count);
+            if (!temp.renameTo(pak))
+                temp.delete();
+        } catch (IOException e) {
+            temp.delete();
+            Log.w("Ironwail", "Could not extract engine support pak: " + e.getMessage());
+        }
     }
 
     private void extractSharewarePak(File dataDir) {
