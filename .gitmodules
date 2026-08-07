@@ -1,0 +1,4 @@
+[submodule "Projects/Android/jni/ironwail"]
+	path = Projects/Android/jni/ironwail
+	url = https://github.com/iAmErmac/ironwail.git
+	branch = android

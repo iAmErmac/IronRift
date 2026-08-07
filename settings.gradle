@@ -1,0 +1,3 @@
+rootProject.name = "IronRift"
+include ':app'
+project(':app').projectDir = file('Projects/Android')

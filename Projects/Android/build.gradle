@@ -1,0 +1,33 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.ermac.ironwail'
+    project.archivesBaseName = 'ironrift'
+    compileSdk 34
+    ndkVersion '27.2.12479018'
+    defaultConfig {
+        applicationId 'com.ermac.ironwail'
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0'
+        externalNativeBuild {
+            ndkBuild { abiFilters 'arm64-v8a' }
+        }
+    }
+    externalNativeBuild { ndkBuild { path file('jni/Android.mk') } }
+    buildTypes {
+        debug { debuggable true; jniDebuggable true }
+        release { minifyEnabled false }
+    }
+    sourceSets {
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            java.srcDirs = ['../../java']
+            assets.srcDirs = ['assets']
+            jniLibs.srcDir 'libs'
+        }
+    }
+}
+repositories { google(); mavenCentral() }
+

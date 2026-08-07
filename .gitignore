@@ -32,3 +32,12 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Local wrapper build/cache output
+.gradle-mobile/
+Projects/Android/build/
+Projects/Android/.cxx/
+
+# docs
+AGENTS.md
+docs/*.md
