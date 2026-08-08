@@ -63,6 +63,8 @@ public final class GLES3JNIActivity extends Activity {
             public void onSurfaceCreated(GL10 gl, EGLConfig config) {
                 nativeInit(dataDir.getAbsolutePath(), launchArgs);
                 nativeStarted = true;
+                if (view.getWidth() > 0 && view.getHeight() > 0)
+                    nativeResize(view.getWidth(), view.getHeight());
             }
             public void onSurfaceChanged(GL10 gl, int width, int height) {
                 nativeResize(width, height);
