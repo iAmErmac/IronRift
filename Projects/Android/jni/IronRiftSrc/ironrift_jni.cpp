@@ -7,6 +7,7 @@
 
 #include "android_lifecycle.h"
 
+
 #define IW_TAG "IronRift"
 #define IW_LOG(...) __android_log_print(ANDROID_LOG_INFO, IW_TAG, __VA_ARGS__)
 
@@ -66,11 +67,32 @@ Java_com_ermac_ironwail_GLES3JNIActivity_nativeRender(JNIEnv *, jclass)
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeCommand(JNIEnv *env, jclass, jstring command)
+{
+    if (!command) return;
+    const char *text = env->GetStringUTFChars(command, nullptr);
+    if (text) { IW_Android_Command(text); env->ReleaseStringUTFChars(command, text); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeAction(JNIEnv *, jclass, jint action, jboolean down)
+{
+    IW_Android_Action(action, down != 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_ermac_ironwail_GLES3JNIActivity_nativeKey(JNIEnv *, jclass, jint keycode, jboolean down)
 {
     IW_Android_Key(keycode, down != 0);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeText(JNIEnv *env, jclass, jstring text)
+{
+    if (!text) return;
+    const char *utf8 = env->GetStringUTFChars(text, nullptr);
+    if (utf8) { IW_Android_Text(utf8); env->ReleaseStringUTFChars(text, utf8); }
+}
 extern "C" JNIEXPORT void JNICALL
 Java_com_ermac_ironwail_GLES3JNIActivity_nativeAxis(JNIEnv *, jclass, jint device_id, jint axis, jfloat value)
 {
@@ -81,6 +103,32 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_ermac_ironwail_GLES3JNIActivity_nativeTouch(JNIEnv *, jclass, jint action, jfloat x, jfloat y)
 {
     IW_Android_Touch(action, x, y);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeTouchPointer(JNIEnv *, jclass, jint action, jint pointer_id, jfloat x, jfloat y)
+{ IW_Android_TouchPointer(action, pointer_id, x, y); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeContextRestored(JNIEnv *, jclass)
+{ IW_Android_ContextRestored(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeSurfaceDestroyed(JNIEnv *, jclass)
+{ IW_Android_SurfaceDestroyed(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeLook(JNIEnv *, jclass, jint delta_x, jint delta_y)
+{ IW_Android_Look(delta_x, delta_y); }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeScreenMode(JNIEnv *, jclass)
+{ return IW_Android_ScreenMode(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeAudioFocus(JNIEnv *, jclass, jboolean focused)
+{
+    IW_Android_AudioFocus(focused != 0);
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -2,3 +2,9 @@
 	path = Projects/Android/jni/ironwail
 	url = https://github.com/iAmErmac/ironwail.git
 	branch = android
+[submodule "mobile-touch-controls"]
+	path = Projects/Android/jni/SupportLibs/MobileTouchControls
+	url = https://github.com/iAmErmac/MobileTouchControls.git
+[submodule "clibs-open-touch"]
+	path = Projects/Android/jni/SupportLibs/Clibs_OpenTouch
+	url = https://github.com/iAmErmac/Clibs_OpenTouch.git
