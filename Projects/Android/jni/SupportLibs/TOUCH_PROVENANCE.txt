@@ -2,7 +2,7 @@ IronRift touch dependency and asset provenance
 
 MobileTouchControls
 - Project fork URL: https://github.com/iAmErmac/MobileTouchControls.git
-- Pinned commit: 551d80781e20b0c27431f1eb86144885ba4496f8
+- Pinned commit: 85f1433ce4171cb0edcf067258099302954ca41b
 - Local patches: the IronRift working tree removes the unrelated saffal dependency, adds GLES3-only build flags, and defines missing SDLK_DELETE/SDLK_INSERT constants for the no-SDL build. The adapter and target wiring are outside the submodule in IronRiftSrc/touch and Android.mk.
 
 Clibs_OpenTouch

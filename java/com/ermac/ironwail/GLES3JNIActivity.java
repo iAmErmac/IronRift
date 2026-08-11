@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.util.Log;
 import android.opengl.GLSurfaceView;
+import android.opengl.GLES30;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -51,6 +52,10 @@ public final class GLES3JNIActivity extends Activity {
     private boolean keyboardVisible;
     private IronRiftTouchOverlay overlay;
     private boolean nativeStarted;
+    private volatile boolean activityResumed;
+    private volatile boolean windowFocused;
+    private volatile boolean surfaceReady;
+    private volatile boolean audioFocused;
     private AudioManager audioManager;
     private AudioManager.OnAudioFocusChangeListener audioFocusListener;
     private static final int STORAGE_ACCESS_REQUEST = 4101;
@@ -88,7 +93,12 @@ SDL.setupJNI();
         SDL.initialize();
         SDL.setContext(this);
         audioManager = (AudioManager)getSystemService(AUDIO_SERVICE);
-        audioFocusListener = change -> { boolean focused = change == AudioManager.AUDIOFOCUS_GAIN; if (view != null) view.queueEvent(() -> nativeAudioFocus(focused)); };
+        audioFocusListener = change -> {
+            boolean focused = change == AudioManager.AUDIOFOCUS_GAIN;
+            audioFocused = focused;
+            if (view != null) view.queueEvent(() -> nativeAudioFocus(focused));
+            if (focused) resumeNativeIfReady();
+        };
 
         final File dataDir = prepareDataDir();
         final String[] launchArgs = readCommandLine(dataDir);
@@ -99,10 +109,14 @@ SDL.setupJNI();
         view.setFocusableInTouchMode(true);
         view.setRenderer(new GLSurfaceView.Renderer() {
             public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+                GLES30.glClearColor(0f, 0f, 0f, 1f);
+                GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT);
                 if (!nativeStarted) nativeInit(dataDir.getAbsolutePath(), launchArgs); else nativeContextRestored();
                 nativeStarted = true;
+                surfaceReady = true;
                 if (view.getWidth() > 0 && view.getHeight() > 0)
                     nativeResize(view.getWidth(), view.getHeight());
+                resumeNativeIfReady();
             }
             public void onSurfaceChanged(GL10 gl, int width, int height) {
                 nativeResize(width, height);
@@ -380,22 +394,61 @@ SDL.setupJNI();
     }
 
     @Override protected void onPause() {
+        activityResumed = false;
+        surfaceReady = false;
         if (overlay != null) overlay.releaseAll();
         if (view != null) view.queueEvent(() -> { nativeSurfaceDestroyed(); nativePause(true); nativeAudioFocus(false); });
+        audioFocused = false;
+        if (audioManager != null) audioManager.abandonAudioFocus(audioFocusListener);
         super.onPause();
         if (view != null) view.onPause();
     }
 
     @Override protected void onResume() {
         super.onResume();
+        activityResumed = true;
         if (view != null) view.onResume();
-        if (audioManager != null) audioManager.requestAudioFocus(audioFocusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
-        if (view != null) view.queueEvent(() -> nativePause(false));
+        audioFocused = false;
+        requestGameAudioFocus();
+        resumeNativeIfReady();
     }
 
-    @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if (hasFocus) enableImmersiveFullscreen(); }
+    private void requestGameAudioFocus() {
+        if (audioManager == null)
+            return;
+        int result = audioManager.requestAudioFocus(audioFocusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            audioFocused = true;
+            if (view != null) view.queueEvent(() -> nativeAudioFocus(true));
+            resumeNativeIfReady();
+        }
+    }
 
+    private void resumeNativeIfReady() {
+        if (!activityResumed || !windowFocused || !surfaceReady || !audioFocused || view == null)
+            return;
+        view.queueEvent(() -> {
+            if (activityResumed && windowFocused && surfaceReady && audioFocused)
+                nativePause(false);
+        });
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus)
+    {
+        super.onWindowFocusChanged(hasFocus);
+        windowFocused = hasFocus;
+        if (hasFocus)
+        {
+            enableImmersiveFullscreen();
+            if (activityResumed)
+                resumeNativeIfReady();
+        }
+    }
     @Override protected void onDestroy() {
+        activityResumed = false;
+        windowFocused = false;
+        surfaceReady = false;
+        audioFocused = false;
         if (nativeStarted && view != null)
             view.queueEvent(GLES3JNIActivity::nativeShutdown);
         if (audioManager != null) audioManager.abandonAudioFocus(audioFocusListener);
@@ -435,9 +488,11 @@ SDL.setupJNI();
             if (!hidden) drawIcon(canvas, gearIcon, w * .84f, h * .12f, Math.min(w,h) * .12f); drawIcon(canvas, hidden ? hideIcon : eyeIcon, w * .94f, h * .12f, Math.min(w,h) * .12f); if (editMode) { drawIcon(canvas, resetIcon, w * .84f, h * .25f, Math.min(w,h) * .12f); drawIcon(canvas, closeIcon, w * .94f, h * .25f, Math.min(w,h) * .12f); }
         }
         void releaseAll() {
+            postMove(0, 0);
             movePointer = lookPointer = -1; menuAxis = 0;
             postAction(0, false); postAction(3, false);
             postAction(2, false);
+            postKey(KeyEvent.KEYCODE_ENTER, false);
             postKey(KeyEvent.KEYCODE_BACK, false); postKey(KeyEvent.KEYCODE_GRAVE, false);
             lookAccumX = lookAccumY = 0; postLook(0, 0); attack = menuShoot = jump = menu = console = false; invalidate();
         }
@@ -478,7 +533,7 @@ SDL.setupJNI();
                 return true;
             }
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL) {
-                if (id == movePointer) { movePointer = -1; menuAxis = 0; postMove(0, 0); } if (id == e.getPointerId(e.getActionIndex())) { dragTarget = -1; saveWidgets(); }
+                if (action == MotionEvent.ACTION_CANCEL && movePointer >= 0) { movePointer = -1; menuAxis = 0; postMove(0, 0); } else if (id == movePointer) { movePointer = -1; menuAxis = 0; postMove(0, 0); } if (id == e.getPointerId(e.getActionIndex())) { dragTarget = -1; saveWidgets(); }
                 if (id == lookPointer) { lookPointer = -1; }
                 if (menuShoot) { menuShoot=false; postKey(KeyEvent.KEYCODE_ENTER, false); } if (attack) { attack = false; postAction(0, false); }
                 if (jump) { jump = false; postAction(2, false); }
