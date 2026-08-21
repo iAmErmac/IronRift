@@ -12,6 +12,8 @@ include $(SDL_ROOT)/Android.mk
 LOCAL_PATH := $(IRONRIFT_PATH)
 IW_ROOT := $(LOCAL_PATH)/../../../../ironwail
 IW_QUAKE := $(IW_ROOT)/Quake
+OPENXR_SDK_ROOT ?= $(LOCAL_PATH)/../../../../openxr-sdk
+OPENXR_LOADER_LIB := $(LOCAL_PATH)/../build/generated/openxr-loader/jniLibs/arm64-v8a/libopenxr_loader.so
 IW_SRC := $(wildcard $(IW_QUAKE)/*.c)
 IW_SRC := $(filter-out \
     %/main_sdl.c \
@@ -24,11 +26,16 @@ IW_SRC := $(subst $(LOCAL_PATH)/,,$(IW_SRC))
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := ironrift
-LOCAL_SRC_FILES := $(IW_SRC) IronRiftSrc/ironrift_jni.cpp IronRiftSrc/touch/ironrift_touch_adapter.cpp
-LOCAL_C_INCLUDES := $(IW_QUAKE) $(SDL_ROOT)/include $(TOUCH_ROOT)
-LOCAL_CFLAGS := -DIRO_RIFT_ANDROID=1 -DANDROID_GLES3=1 -DNO_SDL_CONFIG -DUSE_SDL2 -DUSE_CODEC_WAVE -DWITHOUT_CURL -Wno-unused-parameter
+LOCAL_SRC_FILES := $(IW_SRC) IronRiftSrc/ironrift_jni.cpp IronRiftSrc/ironrift_openxr.cpp IronRiftSrc/touch/ironrift_touch_adapter.cpp
+LOCAL_C_INCLUDES := $(IW_QUAKE) $(SDL_ROOT)/include $(TOUCH_ROOT) $(OPENXR_SDK_ROOT)/include
+LOCAL_CFLAGS := -DIRO_RIFT_ANDROID=1 -DANDROID_GLES3=1 -DXR_USE_PLATFORM_ANDROID -DXR_USE_GRAPHICS_API_OPENGL_ES -DNO_SDL_CONFIG -DUSE_SDL2 -DUSE_CODEC_WAVE -DWITHOUT_CURL -Wno-unused-parameter
 LOCAL_CPPFLAGS := -std=c++17
 LOCAL_STATIC_LIBRARIES := SDL2_static
-LOCAL_SHARED_LIBRARIES := touchcontrols
+LOCAL_SHARED_LIBRARIES := touchcontrols openxr_loader
 LOCAL_LDLIBS := -landroid -llog -lEGL -lGLESv3 -ldl -lOpenSLES -lm
 include $(BUILD_SHARED_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := openxr_loader
+LOCAL_SRC_FILES := ../build/generated/openxr-loader/jniLibs/arm64-v8a/libopenxr_loader.so
+include $(PREBUILT_SHARED_LIBRARY)
