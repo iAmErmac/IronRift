@@ -7,10 +7,9 @@ TOUCH_ROOT := $(IRONRIFT_PATH)/SupportLibs/MobileTouchControls
 include $(TOUCH_ROOT)/Android.mk
 include $(SDL_ROOT)/Android.mk
 
-# Ironwail is the active renderer/engine repository.  Keep the wrapper as a
-# host and compile the Android-selected engine sources directly from it.
+# Ironwail is pinned as a submodule so clean clones and CI use the same engine revision.
 LOCAL_PATH := $(IRONRIFT_PATH)
-IW_ROOT := $(LOCAL_PATH)/../../../../ironwail
+IW_ROOT := $(LOCAL_PATH)/ironwail
 IW_QUAKE := $(IW_ROOT)/Quake
 OPENXR_SDK_ROOT ?= $(LOCAL_PATH)/../../../../openxr-sdk
 OPENXR_LOADER_LIB := $(LOCAL_PATH)/../build/generated/openxr-loader/jniLibs/arm64-v8a/libopenxr_loader.so

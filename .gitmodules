@@ -1,7 +1,7 @@
 [submodule "Projects/Android/jni/ironwail"]
 	path = Projects/Android/jni/ironwail
 	url = https://github.com/iAmErmac/ironwail.git
-	branch = android
+	branch = openxr
 [submodule "mobile-touch-controls"]
 	path = Projects/Android/jni/SupportLibs/MobileTouchControls
 	url = https://github.com/iAmErmac/MobileTouchControls.git

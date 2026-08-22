@@ -7,6 +7,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "xr_virtual_screen.h"
+#include "xr_virtual_environment.h"
 #include <pthread.h>
 #include <unistd.h>
 #include <atomic>
@@ -86,6 +87,7 @@ struct AndroidXRRuntime {
     std::vector<XrSwapchainImageOpenGLESKHR> images;
     GLuint fbo = 0;
     bool swapchain_is_srgb = false;
+    bool virtual_environment_rendered = false;
     AndroidXREyeTarget eyes[2];
     AndroidXREyeTarget pointer;
     bool pointer_active = false;
@@ -500,6 +502,23 @@ static bool RenderStereoFrame(AndroidXRRuntime &xr, XrTime predicted, const iw_x
 #endif
     glDisable(GL_FRAMEBUFFER_SRGB);
     qboolean stereo_used = IW_Android_FrameXRStereo((uint64_t)predicted, snapshot, xr.fbo, xr.width, xr.height, eye_fbos, eye_widths, eye_heights);
+    xr.virtual_environment_rendered = false;
+    if (!stereo_used && IW_Android_GetXRBackdropScene()) {
+        iw_xr_virtual_screen_t screen{};
+        float screen_position[3], screen_orientation[4], scale = 1.f, radius = 3.f;
+        qboolean curved = false;
+        IW_Android_GetXRScreenGeometry(&scale, nullptr, nullptr);
+        IW_Android_GetXRScreenStyle(&curved, &radius);
+        if (IW_Android_GetXRScreenPose(screen_position, screen_orientation)) {
+            std::memcpy(screen.position, screen_position, sizeof(screen.position));
+            std::memcpy(screen.orientation, screen_orientation, sizeof(screen.orientation));
+            screen.width = 2.97f * scale; screen.height = 2.2275f * scale;
+            screen.curved = curved && radius > 1.2f; screen.curve_radius = screen.curved ? radius : 0.f;
+            stereo_used = IW_XRVirtualEnvironment_Render(&snapshot->views[0], &screen, xr.images[mono_index].image, eye_fbos[0], eye_widths[0], eye_heights[0]) &&
+                IW_XRVirtualEnvironment_Render(&snapshot->views[1], &screen, xr.images[mono_index].image, eye_fbos[1], eye_widths[1], eye_heights[1]);
+            xr.virtual_environment_rendered = stereo_used != false;
+        }
+    }
     release_targets();
     return stereo_used != false;
 }
@@ -563,8 +582,10 @@ static void *XRThread(void *) {
                     projection_views[eye].subImage.swapchain = xr.eyes[eye].swapchain; projection_views[eye].subImage.imageRect.offset = {0, 0}; projection_views[eye].subImage.imageRect.extent = {xr.eyes[eye].width, xr.eyes[eye].height}; projection_views[eye].subImage.imageArrayIndex = 0;
                 }
                 layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader *>(&projection));
+                if (!xr.virtual_environment_rendered) {
                 hud.type = XR_TYPE_COMPOSITION_LAYER_QUAD; hud.space = xr.screen_space; hud.eyeVisibility = XR_EYE_VISIBILITY_BOTH; hud.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT; hud.subImage.swapchain = xr.swapchain; hud.subImage.imageRect.offset = {0, 0}; hud.subImage.imageRect.extent = {xr.width, xr.height};
                 if (LocateHUDPose(xr, frame.predictedDisplayTime, &hud.pose)) { float hud_scale = 0.35f, hud_distance = 0.5f, hud_yoffset = 0.f; IW_Android_GetXRHUDGeometry(&hud_scale, &hud_distance, &hud_yoffset); hud.size.width = 1.8f * hud_scale; hud.size.height = hud.size.width * (float)xr.height / (float)xr.width; layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader *>(&hud)); if (!g_hud_pose_logged) { XR_LOG("Android HUD layer submitted size=%.2fx%.2f distance=%.2f", hud.size.width, hud.size.height, hud_distance); g_hud_pose_logged = true; } } else if (!g_hud_pose_missing_logged) { XR_LOG("Android HUD pose locate failed"); g_hud_pose_missing_logged = true; }
+                }
                 if (pointer_used) layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader *>(&pointer_layer));
             }
             else

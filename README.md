@@ -4,7 +4,7 @@
 
 # What's this?
 
-IronRift is the Android host application for [Ironwail](https://github.com/iAmErmac/ironwail), a high-performance Quake engine derived from [QuakeSpasm](https://sourceforge.net/projects/quakespasm/). This project provides the flat-screen Android Activity, native GLES context, surface and lifecycle handling, touch controls, audio integration, and APK packaging. The Ironwail engine and renderer are pulled in as the `android` branch submodule under `Projects/Android/jni/ironwail`.
+IronRift is the Android host application for [Ironwail](https://github.com/iAmErmac/ironwail), a high-performance Quake engine derived from [QuakeSpasm](https://sourceforge.net/projects/quakespasm/). This project provides the flat-screen Android Activity, native GLES context, surface and lifecycle handling, touch controls, audio integration, and APK packaging. The Ironwail engine and renderer are pinned from the `openxr` branch as a submodule under `Projects/Android/jni/ironwail`.
 
 The renderer targets OpenGL ES 3.1 as its baseline and uses ordinary GLES VBOs, EBOs, VAOs, UBOs, and direct indexed draws.
 
@@ -41,7 +41,7 @@ git clone --recurse-submodules https://github.com/iAmErmac/IronRift.git
 git -C IronRift submodule update --init --recursive
 ```
 
-If the repository was cloned without submodules, run the second command before building. Check that `Projects/Android/jni/ironwail` is initialized and follows the `android` branch.
+If the repository was cloned without submodules, run the second command before building. `Projects/Android/jni/ironwail` is pinned to the `openxr` branch.
 
 ## Building the APK
 
