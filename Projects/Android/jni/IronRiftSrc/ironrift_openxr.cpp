@@ -16,6 +16,7 @@
 #include <cctype>
 #include <string>
 #include <cstring>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -23,6 +24,12 @@
 
 #include "android_lifecycle.h"
 #include "xr_action_schema.h"
+#ifndef XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME
+#define XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME "XR_FB_display_refresh_rate"
+typedef XrResult (XRAPI_PTR *PFN_xrEnumerateDisplayRefreshRatesFB)(XrSession session, uint32_t displayRefreshRateCapacityInput, uint32_t *displayRefreshRateCountOutput, float *displayRefreshRates);
+typedef XrResult (XRAPI_PTR *PFN_xrGetDisplayRefreshRateFB)(XrSession session, float *displayRefreshRate);
+typedef XrResult (XRAPI_PTR *PFN_xrRequestDisplayRefreshRateFB)(XrSession session, float displayRefreshRate);
+#endif
 
 #ifndef GL_FRAMEBUFFER_TEXTURE_MULTIVIEW_OVR
 typedef void (GL_APIENTRYP PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLenum, GLenum, GLuint, GLint, GLint, GLsizei);
@@ -96,6 +103,14 @@ struct AndroidXRRuntime {
     bool running = false;
     bool cylinder_supported = false;
     bool color_space_supported = false;
+    bool refresh_rate_supported = false;
+    float requested_refresh_rate = -1.f;
+    float applied_refresh_rate = 0.f;
+    PFN_xrEnumerateDisplayRefreshRatesFB enumerate_display_refresh_rates = nullptr;
+    PFN_xrGetDisplayRefreshRateFB get_display_refresh_rate = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB request_display_refresh_rate = nullptr;
+    XrTime last_pacing_predicted = 0;
+    uint32_t pacing_frame_count = 0;
     iw_xr_virtual_screen_follow_t screen_follow{};
     iw_xr_virtual_screen_follow_t hud_follow{};
     bool ready = false;
@@ -205,10 +220,12 @@ static bool CreateInstance(AndroidXRRuntime &xr) {
     if (!has_android_instance) { XR_ERR("Runtime lacks XR_KHR_android_create_instance"); return false; }
     xr.cylinder_supported = has_extension(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
     xr.color_space_supported = has_extension(XR_FB_COLOR_SPACE_EXTENSION_NAME);
+    xr.refresh_rate_supported = has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     extensions.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
     if (xr.cylinder_supported) extensions.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
     if (xr.color_space_supported) extensions.push_back(XR_FB_COLOR_SPACE_EXTENSION_NAME);
-    XR_LOG("OpenXR extensions: GLES=%d AndroidInstance=%d Cylinder=%d ColorSpace=%d", 1, has_android_instance ? 1 : 0, xr.cylinder_supported ? 1 : 0, xr.color_space_supported ? 1 : 0);
+    if (xr.refresh_rate_supported) extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    XR_LOG("OpenXR extensions: GLES=%d AndroidInstance=%d Cylinder=%d ColorSpace=%d RefreshRate=%d", 1, has_android_instance ? 1 : 0, xr.cylinder_supported ? 1 : 0, xr.color_space_supported ? 1 : 0, xr.refresh_rate_supported ? 1 : 0);
     XrInstanceCreateInfoAndroidKHR android_info{};
     android_info.type = XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR;
     android_info.applicationVM = g_host.vm;
@@ -222,6 +239,29 @@ static bool CreateInstance(AndroidXRRuntime &xr) {
     info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     info.enabledExtensionNames = extensions.data();
     return XR_Ok(xrCreateInstance(&info, &xr.instance), "xrCreateInstance");
+}
+static void ConfigureRefreshRate(AndroidXRRuntime &xr)
+{
+    float rates[16] = {}, current = 0.f, requested = IW_Android_GetXRRefreshRate();
+    uint32_t count = 0, i;
+    if (!xr.refresh_rate_supported || xr.session == XR_NULL_HANDLE) return;
+    if (!xr.enumerate_display_refresh_rates) xrGetInstanceProcAddr(xr.instance, "xrEnumerateDisplayRefreshRatesFB", reinterpret_cast<PFN_xrVoidFunction *>(&xr.enumerate_display_refresh_rates));
+    if (!xr.get_display_refresh_rate) xrGetInstanceProcAddr(xr.instance, "xrGetDisplayRefreshRateFB", reinterpret_cast<PFN_xrVoidFunction *>(&xr.get_display_refresh_rate));
+    if (!xr.request_display_refresh_rate) xrGetInstanceProcAddr(xr.instance, "xrRequestDisplayRefreshRateFB", reinterpret_cast<PFN_xrVoidFunction *>(&xr.request_display_refresh_rate));
+    if (!xr.enumerate_display_refresh_rates || !xr.request_display_refresh_rate) { xr.refresh_rate_supported = false; XR_LOG("refresh-rate extension procedures unavailable; runtime default retained"); return; }
+    if (requested <= 0.f) return;
+    if (xr.requested_refresh_rate == requested) return;
+    xr.requested_refresh_rate = requested;
+    if (xr.enumerate_display_refresh_rates(xr.session, (uint32_t)(sizeof(rates) / sizeof(rates[0])), &count, rates) != XR_SUCCESS || !count) { XR_LOG("refresh-rate query failed; runtime default retained"); return; }
+    count = std::min<uint32_t>(count, (uint32_t)(sizeof(rates) / sizeof(rates[0])));
+    std::string supported;
+    for (i = 0; i < count; ++i) { char value[16]; std::snprintf(value, sizeof(value), "%s%.0f", i ? "," : "", rates[i]); supported += value; }
+    XR_LOG("OpenXR refresh rates supported=%s requested=%.0f", supported.c_str(), requested);
+    for (i = 0; i < count; ++i) if (std::fabs(rates[i] - requested) < 0.01f) break;
+    if (i == count) { XR_LOG("OpenXR refresh rate %.0f unsupported; runtime default retained", requested); return; }
+    if (xr.request_display_refresh_rate(xr.session, rates[i]) == XR_SUCCESS) { xr.applied_refresh_rate = rates[i]; XR_LOG("OpenXR requested refresh rate %.0f Hz", rates[i]); }
+    else XR_LOG("OpenXR refresh-rate request %.0f Hz failed", rates[i]);
+    if (xr.get_display_refresh_rate && xr.get_display_refresh_rate(xr.session, &current) == XR_SUCCESS) XR_LOG("OpenXR current refresh rate %.0f Hz", current);
 }
 static bool CreateMultiviewTarget(AndroidXRRuntime &xr);
 static bool CreateSession(AndroidXRRuntime &xr) {
@@ -245,6 +285,7 @@ static bool CreateSession(AndroidXRRuntime &xr) {
     session_info.next = &binding;
     session_info.systemId = xr.system;
     if (!XR_Ok(xrCreateSession(xr.instance, &session_info, &xr.session), "xrCreateSession")) return false; pthread_mutex_lock(&g_host.mutex); g_active_session = xr.session; pthread_mutex_unlock(&g_host.mutex);
+    ConfigureRefreshRate(xr);
     if (xr.color_space_supported) {
         PFN_xrEnumerateColorSpacesFB enumerate_colorspaces = nullptr;
         PFN_xrSetColorSpaceFB set_colorspace = nullptr;
@@ -472,7 +513,7 @@ static void UpdateActions(AndroidXRRuntime &xr) {
     }
     IW_Android_SetXRActions(&actions);
 }
-static uint32_t g_debug_frame_count = 0; static bool g_hud_pose_logged = false; static bool g_hud_pose_missing_logged = false;static bool LocateScreenPose(AndroidXRRuntime &xr, XrTime predicted, XrPosef *pose) {
+static bool g_hud_pose_logged = false; static bool g_hud_pose_missing_logged = false;static bool LocateScreenPose(AndroidXRRuntime &xr, XrTime predicted, XrPosef *pose) {
     float shared_position[3], shared_orientation[4];
     (void)xr; (void)predicted;
     if (IW_Android_GetXRScreenPose(shared_position, shared_orientation)) {
@@ -692,7 +733,7 @@ static void RenderFrame(AndroidXRRuntime &xr, XrTime predicted) {
 #endif
     glDisable(GL_FRAMEBUFFER_SRGB);
     IW_Android_FrameXR((uint64_t)predicted, xr.fbo, xr.width, xr.height);
-if ((++g_debug_frame_count % 120) == 1) { GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER); unsigned char pixel[4] = {0,0,0,0}; unsigned char sample_a[4] = {0,0,0,0}; unsigned char sample_b[4] = {0,0,0,0}; unsigned char sample_c[4] = {0,0,0,0}; glReadPixels(xr.width / 2, xr.height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel); glReadPixels(xr.width / 4, xr.height / 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sample_a); glReadPixels((xr.width * 3) / 4, xr.height / 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sample_b); glReadPixels(xr.width / 2, (xr.height * 3) / 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sample_c); XR_LOG("frame=%u fbo_status=0x%x samples=%u,%u,%u|%u,%u,%u|%u,%u,%u|%u,%u,%u", g_debug_frame_count, status, pixel[0], pixel[1], pixel[2], sample_a[0], sample_a[1], sample_a[2], sample_b[0], sample_b[1], sample_b[2], sample_c[0], sample_c[1], sample_c[2]); } glBindFramebuffer(GL_FRAMEBUFFER, 0);
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     XrSwapchainImageReleaseInfo release{}; release.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO; xrReleaseSwapchainImage(xr.swapchain, &release);
 }
@@ -704,7 +745,7 @@ static void *XRThread(void *) {
         pthread_mutex_lock(&g_host.mutex); bool stop = g_host.stopping; pthread_mutex_unlock(&g_host.mutex); if (stop) break;
         if (!xr.instance) {
             if (!CreateEGL(xr) || !CreateInstance(xr) || !CreateSession(xr) || !SetupActions(xr)) { XR_ERR("OpenXR setup failed"); DestroyRuntime(xr); pthread_mutex_lock(&g_host.mutex); g_host.paused = true; pthread_mutex_unlock(&g_host.mutex); continue; }
-            g_haptic_runtime = &xr; IW_Android_Resize(xr.width, xr.height); IW_Android_SurfaceCreated(); std::vector<std::string> init_strings = BuildEngineArgs(); std::vector<const char *> init_args; for (const std::string &arg : init_strings) init_args.push_back(arg.c_str()); if (!IW_Android_Init(g_base_dir.c_str(), (int)init_args.size(), init_args.data())) { XR_ERR("Ironwail init failed"); pthread_mutex_lock(&g_host.mutex); g_host.stopping = true; pthread_mutex_unlock(&g_host.mutex); continue; } g_host.initialized = true;
+            g_haptic_runtime = &xr; IW_Android_Resize(xr.width, xr.height); IW_Android_SurfaceCreated(); std::vector<std::string> init_strings = BuildEngineArgs(); std::vector<const char *> init_args; for (const std::string &arg : init_strings) init_args.push_back(arg.c_str()); if (!IW_Android_Init(g_base_dir.c_str(), (int)init_args.size(), init_args.data())) { XR_ERR("Ironwail init failed"); pthread_mutex_lock(&g_host.mutex); g_host.stopping = true; pthread_mutex_unlock(&g_host.mutex); continue; } g_host.initialized = true; ConfigureRefreshRate(xr);
         }
         PollEvents(xr);
         if (g_host.initialized) ResizeEyeTargets(xr);
@@ -721,7 +762,11 @@ static void *XRThread(void *) {
         iw_xr_frame_snapshot_t android_snapshot{};
         if (frame.shouldRender)
         {
+            ConfigureRefreshRate(xr);
             located = LocateStereoFrame(xr, frame.predictedDisplayTime, &android_snapshot);
+            android_snapshot.predicted_display_period = (uint64_t)frame.predictedDisplayPeriod;
+            if (xr.last_pacing_predicted && (++xr.pacing_frame_count % 180u) == 0u) XR_LOG("frame pacing predicted=%.3fms interval=%.3fms target=%.3fms", (double)frame.predictedDisplayTime * 1e-6, (double)(frame.predictedDisplayTime - xr.last_pacing_predicted) * 1e-6, (double)frame.predictedDisplayPeriod * 1e-6);
+            xr.last_pacing_predicted = frame.predictedDisplayTime;
             if (located) stereo_used = RenderStereoFrame(xr, frame.predictedDisplayTime, &android_snapshot);
             bool pointer_used = false;
             float pointer_start[3], pointer_hit[3], pointer_eye[3]; unsigned pointer_color = 0; float pointer_alpha = 0.f, pointer_width = 1.f;
