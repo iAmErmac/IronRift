@@ -13,12 +13,20 @@
 #include <atomic>
 #include <vector>
 #include <cmath>
+#include <cctype>
 #include <string>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <cmath>
+#include <cctype>
 
 #include "android_lifecycle.h"
 #include "xr_action_schema.h"
+
+#ifndef GL_FRAMEBUFFER_TEXTURE_MULTIVIEW_OVR
+typedef void (GL_APIENTRYP PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLenum, GLenum, GLuint, GLint, GLint, GLsizei);
+#endif
 
 #define XR_TAG "IronRiftXR"
 #define XR_LOG(...) __android_log_print(ANDROID_LOG_INFO, XR_TAG, __VA_ARGS__)
@@ -65,6 +73,18 @@ struct AndroidXREyeTarget {
     int height = 0;
 };
 
+struct AndroidXRMultiviewTarget {
+    XrSwapchain swapchain = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageOpenGLESKHR> images;
+    std::vector<GLuint> fbos;
+    std::vector<GLuint> overlay_fbos;
+    std::vector<GLuint> depth_textures;
+    uint32_t image_index = 0;
+    bool acquired = false;
+    bool capable = false;
+    int width = 0;
+    int height = 0;
+};
 struct AndroidXRRuntime {
     XrInstance instance = XR_NULL_HANDLE;
     XrSystemId system = XR_NULL_SYSTEM_ID;
@@ -89,6 +109,10 @@ struct AndroidXRRuntime {
     bool swapchain_is_srgb = false;
     bool virtual_environment_rendered = false;
     AndroidXREyeTarget eyes[2];
+    AndroidXRMultiviewTarget multiview;
+    PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC framebuffer_texture_multiview_ovr = nullptr;
+    bool multiview_rendered = false;
+    int multiview_last_log_state = -1;
     AndroidXREyeTarget pointer;
     bool pointer_active = false;
     float pointer_start[3] = {}, pointer_hit[3] = {};
@@ -122,6 +146,26 @@ struct AndroidXRRuntime {
     bool jump_down = false;
 };
 
+static std::vector<std::string> BuildEngineArgs()
+{
+    std::vector<std::string> args = { "ironwail", "-basedir", g_base_dir, "-condebug", "-nojoy" };
+    std::ifstream file(g_base_dir + "/commandline.txt");
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    bool first = true;
+    for (size_t cursor = 0; cursor < text.size();) {
+        while (cursor < text.size() && std::isspace((unsigned char)text[cursor])) ++cursor;
+        if (cursor == text.size()) break;
+        const char quote = text[cursor] == '"' ? text[cursor++] : 0;
+        std::string token;
+        while (cursor < text.size() && (quote ? text[cursor] != quote : !std::isspace((unsigned char)text[cursor]))) token += text[cursor++];
+        if (quote && cursor < text.size() && text[cursor] == quote) ++cursor;
+        if (first && token == "ironwail") { first = false; continue; }
+        first = false;
+        if (!token.empty()) args.push_back(token);
+    }
+    if (!text.empty()) XR_LOG("Android command line loaded tokens=%u", (unsigned)args.size());
+    return args;
+}
 extern "C" void IW_Android_NativeHaptic(int hand, float amplitude, float duration_seconds) { if (!g_haptic_runtime || !g_haptic_runtime->session || !g_haptic_runtime->haptic || hand < 0 || hand > 1) return; XrHapticActionInfo info{}; info.type = XR_TYPE_HAPTIC_ACTION_INFO; info.action = g_haptic_runtime->haptic; info.subactionPath = hand == 0 ? g_haptic_runtime->left_hand : g_haptic_runtime->right_hand; if (amplitude <= 0.f || duration_seconds <= 0.f) { xrStopHapticFeedback(g_haptic_runtime->session, &info); return; } XrHapticVibration vibration{}; vibration.type = XR_TYPE_HAPTIC_VIBRATION; vibration.amplitude = amplitude > 1.f ? 1.f : amplitude; vibration.duration = (XrDuration)(duration_seconds * 1000000000.0f); vibration.frequency = XR_FREQUENCY_UNSPECIFIED; xrApplyHapticFeedback(g_haptic_runtime->session, &info, reinterpret_cast<const XrHapticBaseHeader *>(&vibration)); }
 static bool CreateEGL(AndroidXRRuntime &xr) {
     xr.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -179,6 +223,7 @@ static bool CreateInstance(AndroidXRRuntime &xr) {
     info.enabledExtensionNames = extensions.data();
     return XR_Ok(xrCreateInstance(&info, &xr.instance), "xrCreateInstance");
 }
+static bool CreateMultiviewTarget(AndroidXRRuntime &xr);
 static bool CreateSession(AndroidXRRuntime &xr) {
     PFN_xrGetOpenGLESGraphicsRequirementsKHR get_requirements = nullptr;
     if (!XR_Ok(xrGetInstanceProcAddr(xr.instance, "xrGetOpenGLESGraphicsRequirementsKHR", reinterpret_cast<PFN_xrVoidFunction *>(&get_requirements)), "xrGetOpenGLESGraphicsRequirementsKHR") || !get_requirements) return false;
@@ -281,6 +326,7 @@ static bool CreateSession(AndroidXRRuntime &xr) {
         if (!XR_Ok(xrEnumerateSwapchainImages(target.swapchain, eye_count, &eye_count, reinterpret_cast<XrSwapchainImageBaseHeader *>(target.images.data())), "xrEnumerateSwapchainImages eye")) return false;
         glGenFramebuffers(1, &target.fbo);
     }
+    CreateMultiviewTarget(xr);
     xr.pointer.width = 256; xr.pointer.height = 64;
     XrSwapchainCreateInfo pointer_info = swap_info; pointer_info.width = xr.pointer.width; pointer_info.height = xr.pointer.height;
     if (!XR_Ok(xrCreateSwapchain(xr.session, &pointer_info, &xr.pointer.swapchain), "xrCreateSwapchain pointer")) return false;
@@ -293,6 +339,67 @@ static bool CreateSession(AndroidXRRuntime &xr) {
     return true;
 }
 
+static void DestroyMultiviewTarget(AndroidXRRuntime &xr)
+{
+    auto &target = xr.multiview;
+    if (!target.fbos.empty()) glDeleteFramebuffers((GLsizei)target.fbos.size(), target.fbos.data());
+    if (!target.overlay_fbos.empty()) glDeleteFramebuffers((GLsizei)target.overlay_fbos.size(), target.overlay_fbos.data());
+    if (!target.depth_textures.empty()) glDeleteTextures((GLsizei)target.depth_textures.size(), target.depth_textures.data());
+    if (target.swapchain) xrDestroySwapchain(target.swapchain);
+    target = AndroidXRMultiviewTarget{};
+    xr.multiview_rendered = false;
+}
+
+static bool CreateMultiviewTarget(AndroidXRRuntime &xr)
+{
+    DestroyMultiviewTarget(xr);
+    xr.framebuffer_texture_multiview_ovr = reinterpret_cast<PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC>(eglGetProcAddress("glFramebufferTextureMultiviewOVR"));
+    if (!xr.framebuffer_texture_multiview_ovr) { XR_LOG("multiview disabled: glFramebufferTextureMultiviewOVR unavailable"); return false; }
+    if (xr.eyes[0].width != xr.eyes[1].width || xr.eyes[0].height != xr.eyes[1].height) { XR_LOG("multiview disabled: asymmetric eye target sizes"); return false; }
+    auto &target = xr.multiview;
+    target.width = xr.eyes[0].width;
+    target.height = xr.eyes[0].height;
+    XrSwapchainCreateInfo info{};
+    info.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
+    info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    info.format = xr.eye_format;
+    info.sampleCount = 1;
+    info.width = target.width;
+    info.height = target.height;
+    info.faceCount = 1;
+    info.arraySize = 2;
+    info.mipCount = 1;
+    if (!XR_Ok(xrCreateSwapchain(xr.session, &info, &target.swapchain), "xrCreateSwapchain multiview")) { DestroyMultiviewTarget(xr); return false; }
+    uint32_t count = 0;
+    if (!XR_Ok(xrEnumerateSwapchainImages(target.swapchain, 0, &count, nullptr), "xrEnumerateSwapchainImages multiview count")) { DestroyMultiviewTarget(xr); return false; }
+    target.images.resize(count);
+    for (auto &image : target.images) image.type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
+    if (!XR_Ok(xrEnumerateSwapchainImages(target.swapchain, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader *>(target.images.data())), "xrEnumerateSwapchainImages multiview")) { DestroyMultiviewTarget(xr); return false; }
+    target.fbos.resize(count);
+    target.overlay_fbos.resize(count * 2);
+    target.depth_textures.resize(count);
+    glGenFramebuffers((GLsizei)count, target.fbos.data());
+    glGenFramebuffers((GLsizei)target.overlay_fbos.size(), target.overlay_fbos.data());
+    glGenTextures((GLsizei)count, target.depth_textures.data());
+    for (uint32_t i = 0; i < count; ++i) {
+        glBindTexture(GL_TEXTURE_2D_ARRAY, target.depth_textures[i]);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH24_STENCIL8, target.width, target.height, 2);
+        glBindFramebuffer(GL_FRAMEBUFFER, target.fbos[i]);
+        xr.framebuffer_texture_multiview_ovr(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target.images[i].image, 0, 0, 2);
+        xr.framebuffer_texture_multiview_ovr(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, target.depth_textures[i], 0, 0, 2);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) { XR_LOG("multiview disabled: FBO status=0x%x", status); glBindFramebuffer(GL_FRAMEBUFFER, 0); DestroyMultiviewTarget(xr); return false; }        for (uint32_t eye = 0; eye < 2; ++eye) {
+            glBindFramebuffer(GL_FRAMEBUFFER, target.overlay_fbos[i * 2 + eye]);
+            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target.images[i].image, 0, eye);
+            status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (status != GL_FRAMEBUFFER_COMPLETE) { XR_LOG("multiview overlay disabled: FBO status=0x%x", status); glBindFramebuffer(GL_FRAMEBUFFER, 0); DestroyMultiviewTarget(xr); return false; }
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    target.capable = true;
+    XR_LOG("multiview target ready size=%dx%d images=%u", target.width, target.height, count);
+    return true;
+}
 static bool ResizeEyeTargets(AndroidXRRuntime &xr)
 {
     float scale = IW_Android_GetXRRenderScale();
@@ -309,6 +416,7 @@ static bool ResizeEyeTargets(AndroidXRRuntime &xr)
         if (!XR_Ok(xrEnumerateSwapchainImages(target.swapchain, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader *>(target.images.data())), "xrEnumerateSwapchainImages resized eye")) return false;
         glGenFramebuffers(1, &target.fbo);
     }
+    CreateMultiviewTarget(xr);
     xr.eye_scale = scale;
     XR_LOG("stereo eye swapchains resized scale=%.2f %dx%d,%dx%d", scale, xr.eyes[0].width, xr.eyes[0].height, xr.eyes[1].width, xr.eyes[1].height);
     return true;
@@ -316,6 +424,7 @@ static bool ResizeEyeTargets(AndroidXRRuntime &xr)
 static void DestroyRuntime(AndroidXRRuntime &xr) {
     if (g_haptic_runtime == &xr) g_haptic_runtime = nullptr;
     pthread_mutex_lock(&g_host.mutex); if (g_active_session == xr.session) g_active_session = XR_NULL_HANDLE; pthread_mutex_unlock(&g_host.mutex);
+    DestroyMultiviewTarget(xr);
     for (auto &eye : xr.eyes) { if (eye.fbo) glDeleteFramebuffers(1, &eye.fbo); if (eye.swapchain) xrDestroySwapchain(eye.swapchain); }
     if (xr.pointer.fbo) glDeleteFramebuffers(1, &xr.pointer.fbo); if (xr.pointer.swapchain) xrDestroySwapchain(xr.pointer.swapchain);
     if (xr.fbo) glDeleteFramebuffers(1, &xr.fbo);
@@ -458,8 +567,60 @@ static bool LocateStereoFrame(AndroidXRRuntime &xr, XrTime predicted, iw_xr_fram
     return true;
 }
 
+static bool RenderMultiviewFrame(AndroidXRRuntime &xr, XrTime predicted, const iw_xr_frame_snapshot_t *snapshot)
+{
+    auto &target = xr.multiview;
+    XrSwapchainImageAcquireInfo acquire{}; acquire.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+    XrSwapchainImageWaitInfo wait{}; wait.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO; wait.timeout = XR_INFINITE_DURATION;
+    XrSwapchainImageReleaseInfo release{}; release.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+    bool mono_acquired = false;
+    uint32_t mono_index = 0;
+    unsigned overlay_fbos[2] = {};
+    if (!XR_Ok(xrAcquireSwapchainImage(xr.swapchain, &acquire, &mono_index), "xrAcquireSwapchainImage multiview mono")) return false;
+    mono_acquired = true;
+    if (!XR_Ok(xrWaitSwapchainImage(xr.swapchain, &wait), "xrWaitSwapchainImage multiview mono")) goto done;
+    if (!XR_Ok(xrAcquireSwapchainImage(target.swapchain, &acquire, &target.image_index), "xrAcquireSwapchainImage multiview")) goto done;
+    target.acquired = true;
+    if (!XR_Ok(xrWaitSwapchainImage(target.swapchain, &wait), "xrWaitSwapchainImage multiview")) goto done;
+    glBindFramebuffer(GL_FRAMEBUFFER, target.fbos[target.image_index]);
+    glViewport(0, 0, target.width, target.height);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, xr.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, xr.images[mono_index].image, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) goto done;
+    glViewport(0, 0, xr.width, xr.height);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    xr.virtual_environment_rendered = false;
+    overlay_fbos[0] = target.overlay_fbos[target.image_index * 2];
+    overlay_fbos[1] = target.overlay_fbos[target.image_index * 2 + 1];
+    if (!IW_Android_FrameXRStereoMultiview((uint64_t)predicted, snapshot, xr.fbo, xr.width, xr.height, target.fbos[target.image_index], overlay_fbos, target.width, target.height)) goto done;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    xrReleaseSwapchainImage(target.swapchain, &release); target.acquired = false;
+    xrReleaseSwapchainImage(xr.swapchain, &release);
+    return true;
+done:
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (target.acquired) { xrReleaseSwapchainImage(target.swapchain, &release); target.acquired = false; }
+    if (mono_acquired) xrReleaseSwapchainImage(xr.swapchain, &release);
+    return false;
+}
 static bool RenderStereoFrame(AndroidXRRuntime &xr, XrTime predicted, const iw_xr_frame_snapshot_t *snapshot)
 {
+    xr.multiview_rendered = false;
+    const bool requested = IW_Android_XRMultiviewRequested();
+    const bool gameplay = IW_Android_XRGameplayStereoEligible();
+    const bool active = requested && gameplay && xr.multiview.capable;
+    if (xr.multiview_last_log_state != (active ? 1 : 0)) {
+        XR_LOG("multiview requested=%d target_ready=%d gameplay=%d active=%d", requested ? 1 : 0, xr.multiview.capable ? 1 : 0, gameplay ? 1 : 0, active ? 1 : 0);
+        xr.multiview_last_log_state = active ? 1 : 0;
+    }
+    if (active) {
+        xr.multiview_rendered = RenderMultiviewFrame(xr, predicted, snapshot);
+        if (xr.multiview_rendered) return true;
+        XR_LOG("multiview frame failed; falling back to two-pass stereo");
+    }
     XrSwapchainImageAcquireInfo acquire{}; acquire.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
     XrSwapchainImageWaitInfo wait{}; wait.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO; wait.timeout = XR_INFINITE_DURATION;
     XrSwapchainImageReleaseInfo release{}; release.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
@@ -543,7 +704,7 @@ static void *XRThread(void *) {
         pthread_mutex_lock(&g_host.mutex); bool stop = g_host.stopping; pthread_mutex_unlock(&g_host.mutex); if (stop) break;
         if (!xr.instance) {
             if (!CreateEGL(xr) || !CreateInstance(xr) || !CreateSession(xr) || !SetupActions(xr)) { XR_ERR("OpenXR setup failed"); DestroyRuntime(xr); pthread_mutex_lock(&g_host.mutex); g_host.paused = true; pthread_mutex_unlock(&g_host.mutex); continue; }
-            g_haptic_runtime = &xr; IW_Android_Resize(xr.width, xr.height); IW_Android_SurfaceCreated(); const char *init_args[] = { "ironwail", "-basedir", g_base_dir.c_str(), "-condebug", "-nojoy" }; if (!IW_Android_Init(g_base_dir.c_str(), 5, init_args)) { XR_ERR("Ironwail init failed"); pthread_mutex_lock(&g_host.mutex); g_host.stopping = true; pthread_mutex_unlock(&g_host.mutex); continue; } g_host.initialized = true;
+            g_haptic_runtime = &xr; IW_Android_Resize(xr.width, xr.height); IW_Android_SurfaceCreated(); std::vector<std::string> init_strings = BuildEngineArgs(); std::vector<const char *> init_args; for (const std::string &arg : init_strings) init_args.push_back(arg.c_str()); if (!IW_Android_Init(g_base_dir.c_str(), (int)init_args.size(), init_args.data())) { XR_ERR("Ironwail init failed"); pthread_mutex_lock(&g_host.mutex); g_host.stopping = true; pthread_mutex_unlock(&g_host.mutex); continue; } g_host.initialized = true;
         }
         PollEvents(xr);
         if (g_host.initialized) ResizeEyeTargets(xr);
@@ -579,7 +740,7 @@ static void *XRThread(void *) {
                 for (unsigned eye = 0; eye < 2; ++eye)
                 {
                     projection_views[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW; projection_views[eye].pose = xr.located_views[eye].pose; projection_views[eye].fov = xr.located_views[eye].fov;
-                    projection_views[eye].subImage.swapchain = xr.eyes[eye].swapchain; projection_views[eye].subImage.imageRect.offset = {0, 0}; projection_views[eye].subImage.imageRect.extent = {xr.eyes[eye].width, xr.eyes[eye].height}; projection_views[eye].subImage.imageArrayIndex = 0;
+                    projection_views[eye].subImage.swapchain = xr.multiview_rendered ? xr.multiview.swapchain : xr.eyes[eye].swapchain; projection_views[eye].subImage.imageRect.offset = {0, 0}; projection_views[eye].subImage.imageRect.extent = xr.multiview_rendered ? XrExtent2Di{xr.multiview.width, xr.multiview.height} : XrExtent2Di{xr.eyes[eye].width, xr.eyes[eye].height}; projection_views[eye].subImage.imageArrayIndex = xr.multiview_rendered ? eye : 0;
                 }
                 layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader *>(&projection));
                 if (!xr.virtual_environment_rendered) {
