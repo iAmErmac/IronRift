@@ -17,6 +17,8 @@
 #include <string>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <climits>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -64,6 +66,99 @@ static AndroidXRRuntime *g_haptic_runtime = nullptr;
 static XrSession g_active_session = XR_NULL_HANDLE;
 static std::string g_base_dir = ".";
 
+extern "C" void Modlist_AndroidDownloadProgress(int bytes);
+extern "C" qboolean Modlist_AndroidDownloadCancelled(void);
+
+static JNIEnv *IW_GetJNIEnv(bool *detach)
+{
+    JNIEnv *env = nullptr;
+    *detach = false;
+    if (!g_host.vm)
+        return nullptr;
+    if (g_host.vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK)
+    {
+        if (g_host.vm->AttachCurrentThread(&env, nullptr) != JNI_OK)
+            return nullptr;
+        *detach = true;
+    }
+    return env;
+}
+
+static jobject IW_GetActivity(JNIEnv *env)
+{
+    jobject activity;
+    pthread_mutex_lock(&g_host.mutex);
+    activity = g_host.activity ? env->NewLocalRef(g_host.activity) : nullptr;
+    pthread_mutex_unlock(&g_host.mutex);
+    return activity;
+}
+
+extern "C" char *IW_Android_DownloadText(const char *url)
+{
+    bool detach;
+    JNIEnv *env = IW_GetJNIEnv(&detach);
+    jobject activity = env ? IW_GetActivity(env) : nullptr;
+    char *result = nullptr;
+    if (activity)
+    {
+        jclass type = env->GetObjectClass(activity);
+        jmethodID method = type ? env->GetMethodID(type, "downloadAddonText", "(Ljava/lang/String;)Ljava/lang/String;") : nullptr;
+        jstring request = method ? env->NewStringUTF(url) : nullptr;
+        jstring text = request ? static_cast<jstring>(env->CallObjectMethod(activity, method, request)) : nullptr;
+        if (!env->ExceptionCheck() && text)
+        {
+            const char *utf8 = env->GetStringUTFChars(text, nullptr);
+            if (utf8)
+            {
+                size_t length = strlen(utf8);
+                result = static_cast<char *>(malloc(length + 1));
+                if (result) memcpy(result, utf8, length + 1);
+                env->ReleaseStringUTFChars(text, utf8);
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (text) env->DeleteLocalRef(text);
+        if (request) env->DeleteLocalRef(request);
+        if (type) env->DeleteLocalRef(type);
+        env->DeleteLocalRef(activity);
+    }
+    if (detach) g_host.vm->DetachCurrentThread();
+    return result;
+}
+
+extern "C" qboolean IW_Android_DownloadFile(const char *url, const char *destination)
+{
+    bool detach;
+    JNIEnv *env = IW_GetJNIEnv(&detach);
+    jobject activity = env ? IW_GetActivity(env) : nullptr;
+    qboolean ok = false;
+    if (activity)
+    {
+        jclass type = env->GetObjectClass(activity);
+        jmethodID method = type ? env->GetMethodID(type, "downloadAddonFile", "(Ljava/lang/String;Ljava/lang/String;)Z") : nullptr;
+        jstring request = method ? env->NewStringUTF(url) : nullptr;
+        jstring target = method ? env->NewStringUTF(destination) : nullptr;
+        if (request && target)
+            ok = env->CallBooleanMethod(activity, method, request, target) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+        if (target) env->DeleteLocalRef(target);
+        if (request) env->DeleteLocalRef(request);
+        if (type) env->DeleteLocalRef(type);
+        env->DeleteLocalRef(activity);
+    }
+    if (detach) g_host.vm->DetachCurrentThread();
+    return ok;
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3OpenXRActivity_nativeAddonDownloadProgress(JNIEnv *, jobject, jlong bytes)
+{
+    Modlist_AndroidDownloadProgress(bytes > INT_MAX ? INT_MAX : static_cast<int>(bytes));
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ermac_ironwail_GLES3OpenXRActivity_nativeAddonDownloadCancelled(JNIEnv *, jobject)
+{
+    return Modlist_AndroidDownloadCancelled() ? JNI_TRUE : JNI_FALSE;
+}
 static bool XR_Ok(XrResult result, const char *what) {
     if (result == XR_SUCCESS) return true;
     XR_ERR("%s failed: %d", what, (int)result);

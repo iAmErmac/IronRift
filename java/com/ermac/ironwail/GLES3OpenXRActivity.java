@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.Environment;
+import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -14,16 +15,29 @@ import android.view.View;
 import android.content.pm.ActivityInfo;
 import android.content.res.AssetManager;
 import java.io.File;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public final class GLES3OpenXRActivity extends Activity implements SurfaceHolder.Callback {
     static { System.loadLibrary("ironrift"); }
     private SurfaceView surfaceView;
+    private File dataDir;
     private boolean nativeStarted;
     private boolean resumed;
     private boolean focused;
@@ -37,6 +51,8 @@ public final class GLES3OpenXRActivity extends Activity implements SurfaceHolder
     private native void nativePause(boolean paused);
     private native void nativeFocus(boolean focused);
     private native void nativeAudioFocus(boolean focused);
+    private native void nativeAddonDownloadProgress(long bytes);
+    private native boolean nativeAddonDownloadCancelled();
     private native void nativeShutdown();
 
     @Override public void onCreate(Bundle state) {
@@ -73,14 +89,206 @@ public final class GLES3OpenXRActivity extends Activity implements SurfaceHolder
         if (!dir.exists()) dir.mkdirs();
         copyAssetIfChanged("ironwail.pak", new File(dir, "ironwail.pak"));
         copyAssetIfChanged("ironwail_vr.pak", new File(dir, "ironwail_vr.pak"));
+        copyAssetIfMissing("addons.json", new File(dir, "addons.json"));
+        copyAssetIfMissing("addons.url.dat", new File(dir, "addons.url.dat"));
         File id1 = new File(dir, "id1");
         if (!id1.exists()) id1.mkdirs();
         copyAssetIfMissing("quake_shareware.zip", new File(dir, "quake_shareware.zip"));
         extractShareware(new File(dir, "quake_shareware.zip"), id1);
         ensureCommandLine(new File(dir, "commandline.txt"));
+        dataDir = dir;
         return dir;
     }
 
+    private HttpURLConnection openAddonConnection(String address) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection)new URL(address).openConnection();
+        connection.setInstanceFollowRedirects(true);
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(30000);
+        connection.setRequestProperty("Accept-Encoding", "identity");
+        int status = connection.getResponseCode();
+        if (status < 200 || status >= 300) {
+            connection.disconnect();
+            throw new IOException("HTTP " + status);
+        }
+        return connection;
+    }
+
+    public String downloadAddonText(String address) {
+        HttpURLConnection connection = null;
+        try {
+            connection = openAddonConnection(address);
+            try (InputStream in = connection.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[65536];
+                int count;
+                while ((count = in.read(buffer)) != -1) {
+                    if (out.size() + count > 4 * 1024 * 1024) throw new IOException("catalog exceeds 4 MB");
+                    out.write(buffer, 0, count);
+                }
+                Log.i("Ironwail", "Downloaded add-on catalog");
+                return out.toString("UTF-8");
+            }
+        } catch (IOException e) {
+            Log.w("Ironwail", "Could not download add-on catalog: " + e.getMessage());
+            return null;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    public boolean downloadAddonFile(String address, String destination) {
+        try {
+            if (dataDir == null) throw new IOException("game data path is unavailable");
+            File root = dataDir.getCanonicalFile();
+            File target = new File(destination).getCanonicalFile();
+            if (!target.getPath().startsWith(root.getPath() + File.separator)) throw new IOException("download target is outside game data");
+            File parent = target.getParentFile();
+            if (parent == null || (!parent.exists() && !parent.mkdirs())) throw new IOException("could not create add-on directory");
+            long total = probeAddonSize(address);
+            /* Android builds omit libcurl; use the platform TLS stack and split only range-capable large archives, with a single-stream fallback for every server. */
+            if (total >= 4 * 1024 * 1024 && supportsAddonRanges(address)) {
+                Log.i("Ironwail", "Downloading add-on archive with 4 HTTP ranges");
+                downloadAddonRanges(address, target, total);
+            } else {
+                Log.i("Ironwail", "Downloading add-on archive with one HTTP stream");
+                downloadAddonStream(address, target);
+            }
+            Log.i("Ironwail", "Downloaded add-on archive: " + target.getName());
+            return true;
+        } catch (IOException e) {
+            Log.w("Ironwail", "Could not download add-on archive: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private long probeAddonSize(String address) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection)new URL(address).openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setRequestMethod("HEAD");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            int status = connection.getResponseCode();
+            return status >= 200 && status < 300 ? connection.getContentLengthLong() : -1;
+        } catch (IOException ignored) {
+            return -1;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+    private boolean supportsAddonRanges(String address) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection)new URL(address).openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Range", "bytes=0-0");
+            return connection.getResponseCode() == HttpURLConnection.HTTP_PARTIAL;
+        } catch (IOException ignored) {
+            return false;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void downloadAddonStream(String address, File target) throws IOException {
+        HttpURLConnection connection = openAddonConnection(address);
+        connection.setReadTimeout(5000);
+        AtomicLong downloaded = new AtomicLong();
+        AtomicLong lastReport = new AtomicLong(android.os.SystemClock.elapsedRealtime());
+        try (InputStream in = connection.getInputStream(); FileOutputStream out = new FileOutputStream(target, false)) {
+            copyAddonBytes(in, out, downloaded, lastReport);
+            out.getFD().sync();
+        } finally {
+            connection.disconnect();
+        }
+        nativeAddonDownloadProgress(downloaded.get());
+    }
+
+    private void downloadAddonRanges(String address, File target, long total) throws IOException {
+        final int parts = 4;
+        final AtomicLong downloaded = new AtomicLong();
+        final AtomicLong lastReport = new AtomicLong(android.os.SystemClock.elapsedRealtime());
+        try (RandomAccessFile output = new RandomAccessFile(target, "rw")) {
+            output.setLength(total);
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(parts);
+        List<Future<Void>> jobs = new ArrayList<>();
+        try {
+            for (int index = 0; index < parts; index++) {
+                final long start = total * index / parts;
+                final long end = total * (index + 1) / parts - 1;
+                jobs.add(executor.submit(new Callable<Void>() {
+                    @Override public Void call() throws Exception {
+                        downloadAddonRange(address, target, start, end, downloaded, lastReport);
+                        return null;
+                    }
+                }));
+            }
+            for (Future<Void> job : jobs) job.get();
+        } catch (Exception e) {
+            for (Future<Void> job : jobs) job.cancel(true);
+            throw new IOException("parallel download failed", e);
+        } finally {
+            executor.shutdownNow();
+        }
+        nativeAddonDownloadProgress(downloaded.get());
+    }
+
+    private void downloadAddonRange(String address, File target, long start, long end, AtomicLong downloaded, AtomicLong lastReport) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection)new URL(address).openConnection();
+        try {
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(5000);
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Range", "bytes=" + start + "-" + end);
+            if (connection.getResponseCode() != HttpURLConnection.HTTP_PARTIAL) throw new IOException("server rejected byte range");
+            try (InputStream in = connection.getInputStream(); RandomAccessFile out = new RandomAccessFile(target, "rw")) {
+                out.seek(start);
+                copyAddonBytes(in, out, downloaded, lastReport);
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private void copyAddonBytes(InputStream in, FileOutputStream out, AtomicLong downloaded, AtomicLong lastReport) throws IOException {
+        byte[] buffer = new byte[65536];
+        int count;
+        while (true) {
+            ensureAddonDownloadActive();
+            count = in.read(buffer);
+            if (count == -1) break;
+            out.write(buffer, 0, count);
+            reportAddonProgress(downloaded.addAndGet(count), lastReport);
+        }
+    }
+
+    private void copyAddonBytes(InputStream in, RandomAccessFile out, AtomicLong downloaded, AtomicLong lastReport) throws IOException {
+        byte[] buffer = new byte[65536];
+        int count;
+        while (true) {
+            ensureAddonDownloadActive();
+            count = in.read(buffer);
+            if (count == -1) break;
+            out.write(buffer, 0, count);
+            reportAddonProgress(downloaded.addAndGet(count), lastReport);
+        }
+    }
+
+    private void ensureAddonDownloadActive() throws IOException {
+        if (nativeAddonDownloadCancelled()) throw new IOException("download cancelled");
+    }
+    private void reportAddonProgress(long downloaded, AtomicLong lastReport) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        long previous = lastReport.get();
+        if (now - previous >= 1000 && lastReport.compareAndSet(previous, now)) nativeAddonDownloadProgress(downloaded);
+    }
     private void ensureCommandLine(File file) {
         if (file.isFile()) return;
         try (FileOutputStream out = new FileOutputStream(file)) { out.write("ironwail -condebug\n".getBytes("UTF-8")); } catch (Exception ignored) { }
