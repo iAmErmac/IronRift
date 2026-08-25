@@ -4,12 +4,88 @@
 #include <time.h>
 #include <string>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <climits>
+#include <SDL_system.h>
 
 #include "android_lifecycle.h"
 
 
 #define IW_TAG "IronRift"
 #define IW_LOG(...) __android_log_print(ANDROID_LOG_INFO, IW_TAG, __VA_ARGS__)
+extern "C" void Modlist_AndroidDownloadProgress(int bytes);
+extern "C" qboolean Modlist_AndroidDownloadCancelled(void);
+
+static JNIEnv *IW_GetJNIEnv(void)
+{
+    return static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+}
+
+extern "C" char *IW_Android_DownloadText(const char *url)
+{
+    JNIEnv *env = IW_GetJNIEnv();
+    jobject activity = env ? static_cast<jobject>(SDL_AndroidGetActivity()) : nullptr;
+    char *result = nullptr;
+    if (activity)
+    {
+        jclass type = env->GetObjectClass(activity);
+        jmethodID method = type ? env->GetMethodID(type, "downloadAddonText", "(Ljava/lang/String;)Ljava/lang/String;") : nullptr;
+        jstring request = method ? env->NewStringUTF(url) : nullptr;
+        jstring text = request ? static_cast<jstring>(env->CallObjectMethod(activity, method, request)) : nullptr;
+        if (!env->ExceptionCheck() && text)
+        {
+            const char *utf8 = env->GetStringUTFChars(text, nullptr);
+            if (utf8)
+            {
+                size_t length = strlen(utf8);
+                result = static_cast<char *>(malloc(length + 1));
+                if (result) memcpy(result, utf8, length + 1);
+                env->ReleaseStringUTFChars(text, utf8);
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (text) env->DeleteLocalRef(text);
+        if (request) env->DeleteLocalRef(request);
+        if (type) env->DeleteLocalRef(type);
+        env->DeleteLocalRef(activity);
+    }
+    return result;
+}
+
+extern "C" qboolean IW_Android_DownloadFile(const char *url, const char *destination)
+{
+    JNIEnv *env = IW_GetJNIEnv();
+    jobject activity = env ? static_cast<jobject>(SDL_AndroidGetActivity()) : nullptr;
+    qboolean ok = false;
+    if (activity)
+    {
+        jclass type = env->GetObjectClass(activity);
+        jmethodID method = type ? env->GetMethodID(type, "downloadAddonFile", "(Ljava/lang/String;Ljava/lang/String;)Z") : nullptr;
+        jstring request = method ? env->NewStringUTF(url) : nullptr;
+        jstring target = method ? env->NewStringUTF(destination) : nullptr;
+        if (request && target)
+            ok = env->CallBooleanMethod(activity, method, request, target) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+        if (target) env->DeleteLocalRef(target);
+        if (request) env->DeleteLocalRef(request);
+        if (type) env->DeleteLocalRef(type);
+        env->DeleteLocalRef(activity);
+    }
+    return ok;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeAddonDownloadProgress(JNIEnv *, jclass, jlong bytes)
+{
+    Modlist_AndroidDownloadProgress(bytes > INT_MAX ? INT_MAX : static_cast<int>(bytes));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ermac_ironwail_GLES3JNIActivity_nativeAddonDownloadCancelled(JNIEnv *, jclass)
+{
+    return Modlist_AndroidDownloadCancelled() ? JNI_TRUE : JNI_FALSE;
+}
 
 static uint64_t IW_NowNS(void)
 {
