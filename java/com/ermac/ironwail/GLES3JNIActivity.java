@@ -69,6 +69,7 @@ public final class GLES3JNIActivity extends Activity {
     private AudioManager audioManager;
     private AudioManager.OnAudioFocusChangeListener audioFocusListener;
     private static final int STORAGE_ACCESS_REQUEST = 4101;
+    private static final int LEGACY_STORAGE_REQUEST = 4102;
 
     private static native void nativeInit(String dataDir, String[] launchArgs);
     private static native void nativeResize(int width, int height);
@@ -97,6 +98,13 @@ public final class GLES3JNIActivity extends Activity {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
 
+        if (requiresLegacyStoragePermission()) {
+            requestPermissions(new String[] {
+                android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+            }, LEGACY_STORAGE_REQUEST);
+            return;
+        }
         if (requiresStorageAccess()) {
             requestStorageAccess();
             return;
@@ -214,6 +222,17 @@ SDL.setupJNI();
         window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
         int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
         window.getDecorView().setSystemUiVisibility(flags);
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == LEGACY_STORAGE_REQUEST) recreate();
+    }
+
+    private boolean requiresLegacyStoragePermission() {
+        return Build.VERSION.SDK_INT <= 28
+            && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED;
     }
 
     private boolean requiresStorageAccess() {
