@@ -237,6 +237,7 @@ SDL.setupJNI();
         if (!dataDir.exists() && !dataDir.mkdirs())
             Log.e("Ironwail", "Could not create Quake data directory: " + dataDir);
         extractEnginePak(dataDir);
+        copyAssetIfMissing("vr_weapons.pk3", new File(dataDir, "vr_weapons.pk3"));
         extractSharewarePak(dataDir);
         return dataDir;
     }
@@ -324,6 +325,20 @@ SDL.setupJNI();
         } catch (IOException e) {
             temp.delete();
             Log.w("Ironwail", "Could not extract engine support pak: " + e.getMessage());
+        }
+    }
+
+    private void copyAssetIfMissing(String name, File destination) {
+        if (destination.isFile())
+            return;
+        try (InputStream in = getAssets().open(name);
+             FileOutputStream out = new FileOutputStream(destination)) {
+            byte[] buffer = new byte[65536];
+            int count;
+            while ((count = in.read(buffer)) != -1)
+                out.write(buffer, 0, count);
+        } catch (IOException e) {
+            Log.w("Ironwail", "Could not copy bundled asset: " + e.getMessage());
         }
     }
 

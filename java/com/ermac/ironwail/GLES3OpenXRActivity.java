@@ -89,6 +89,7 @@ public final class GLES3OpenXRActivity extends Activity implements SurfaceHolder
         if (!dir.exists()) dir.mkdirs();
         copyAssetIfChanged("ironwail.pak", new File(dir, "ironwail.pak"));
         copyAssetIfChanged("ironwail_vr.pak", new File(dir, "ironwail_vr.pak"));
+        copyAssetIfMissing("vr_weapons.pk3", new File(dir, "vr_weapons.pk3"));
         copyAssetIfMissing("addons.json", new File(dir, "addons.json"));
         copyAssetIfMissing("addons.url.dat", new File(dir, "addons.url.dat"));
         File id1 = new File(dir, "id1");
